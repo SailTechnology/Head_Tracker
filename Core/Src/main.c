@@ -351,10 +351,47 @@ void StartPPMTask(void const * argument)
 void StartKeyTask(void const * argument)
 {
   /* USER CODE BEGIN StartKeyTask */
+  static GPIO_PinState lastKeyState = GPIO_PIN_SET; // 初始状态为高（上拉）
+  static GPIO_PinState ledState = GPIO_PIN_RESET;   // LED初始状态为低
+  static uint32_t debounceCounter = 0;
+  const uint32_t DEBOUNCE_DELAY = 50; // 防抖延迟50ms (假设系统时钟为1ms)
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    GPIO_PinState currentKeyState = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
+
+    // 检测按键状态变化
+    if (currentKeyState != lastKeyState)
+    {
+      // 状态变化，开始防抖计数
+      if (debounceCounter == 0)
+      {
+        debounceCounter = DEBOUNCE_DELAY;
+      }
+      else
+      {
+        debounceCounter--;
+        if (debounceCounter == 0)
+        {
+          // 防抖完成，确认状态变化
+          if (currentKeyState == GPIO_PIN_RESET) // 按键按下（低电平）
+          {
+            // 切换LED状态
+            ledState = (ledState == GPIO_PIN_RESET) ? GPIO_PIN_SET : GPIO_PIN_RESET;
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState);
+          }
+          lastKeyState = currentKeyState;
+        }
+      }
+    }
+    else
+    {
+      // 状态稳定，重置防抖计数
+      debounceCounter = 0;
+    }
+
+    osDelay(1); // 1ms延迟
   }
   /* USER CODE END StartKeyTask */
 }
