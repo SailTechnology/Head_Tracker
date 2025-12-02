@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "task.h" // 引入FreeRTOS任务头文件以使用临界区
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,7 +48,7 @@ osThreadId UARTTaskHandle;
 osThreadId PPMTaskHandle;
 osThreadId KeyTaskHandle;
 /* USER CODE BEGIN PV */
-
+uint16_t ppm_channels[3] = {1500, 1500, 1500}; // 3个通道的PPM值 (1000-2000us)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -297,10 +297,28 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+  int16_t dir[3] = {10, 20, 30}; // 步进方向和速度
+  
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    for(int i=0; i<3; i++)
+    {
+      ppm_channels[i] += dir[i];
+      
+      if(ppm_channels[i] >= 2000)
+      {
+        ppm_channels[i] = 2000;
+        dir[i] = -dir[i]; // 反转方向
+      }
+      else if(ppm_channels[i] <= 1000)
+      {
+        ppm_channels[i] = 1000;
+        dir[i] = -dir[i]; // 反转方向
+      }
+    }
+    
+    osDelay(20); // 20ms更新一次
   }
   /* USER CODE END 5 */
 }
@@ -333,10 +351,68 @@ void StartUARTTask(void const * argument)
 void StartPPMTask(void const * argument)
 {
   /* USER CODE BEGIN StartPPMTask */
+  // 开启DWT计数器用于微秒延时
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  const uint32_t PPM_FRAME_LEN_US = 20000; // 20ms
+  const uint32_t PULSE_WIDTH_US = 300;     // 300us 低电平脉冲
+  const uint32_t CHANNEL_COUNT = 3;
+  
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    uint32_t current_frame_us = 0;
+
+    // 进入临界区，关闭中断以保证PPM时序精确
+    taskENTER_CRITICAL();
+
+    for(int i=0; i<CHANNEL_COUNT; i++)
+    {
+      uint16_t val = ppm_channels[i];
+      if(val < 1000) val = 1000;
+      if(val > 2000) val = 2000;
+
+      // 1. 发送分隔脉冲 (低电平 300us)
+      HAL_GPIO_WritePin(PPM_IO_GPIO_Port, PPM_IO_Pin, GPIO_PIN_RESET);
+      uint32_t start = DWT->CYCCNT;
+      uint32_t cycles = PULSE_WIDTH_US * (SystemCoreClock / 1000000);
+      while ((DWT->CYCCNT - start) < cycles);
+
+      // 2. 发送数据脉冲 (高电平 Val-300 us)
+      HAL_GPIO_WritePin(PPM_IO_GPIO_Port, PPM_IO_Pin, GPIO_PIN_SET);
+      start = DWT->CYCCNT;
+      cycles = (val - PULSE_WIDTH_US) * (SystemCoreClock / 1000000);
+      while ((DWT->CYCCNT - start) < cycles);
+
+      current_frame_us += val;
+    }
+
+    // 发送最后一个分隔脉冲 (低电平 300us)
+    HAL_GPIO_WritePin(PPM_IO_GPIO_Port, PPM_IO_Pin, GPIO_PIN_RESET);
+    uint32_t start = DWT->CYCCNT;
+    uint32_t cycles = PULSE_WIDTH_US * (SystemCoreClock / 1000000);
+    while ((DWT->CYCCNT - start) < cycles);
+    
+    current_frame_us += PULSE_WIDTH_US;
+
+    // 恢复高电平 (同步信号)
+    HAL_GPIO_WritePin(PPM_IO_GPIO_Port, PPM_IO_Pin, GPIO_PIN_SET);
+
+    taskEXIT_CRITICAL();
+
+    // 延时补齐20ms帧周期
+    // 计算剩余时间 (ms)
+    uint32_t elapsed_ms = current_frame_us / 1000;
+    if (elapsed_ms < 16) // 留出至少4ms同步时间
+    {
+      osDelay(20 - elapsed_ms);
+    }
+    else
+    {
+      osDelay(4); // 至少给4ms同步时间
+    }
   }
   /* USER CODE END StartPPMTask */
 }
